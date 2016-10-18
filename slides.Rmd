@@ -1,0 +1,465 @@
+---
+title: "The Role of R and Data Visualisation in Understanding Our World"
+author: "Professor Di Cook, Econometrics and Business Statistics"
+date: "R-Ladies Melbourne"
+output:
+  beamer_presentation: 
+    theme: Monash
+    fig_caption: false
+---
+
+## Power to the People
+
+H. G. Wells (1903) Mankind in the Making
+
+*"Statistical thinking will one day be as necessary for efficient citizenship as the ability to read and write!"*
+
+## Open data, open source
+
+- Data is available everywhere today, publicly, free
+- Software, very powerful software, for analysis of data is available publicly, free
+- Combined with a knowledge of mathematics and statistics empowers each of us to contribute to understand and improve our world
+-
+- I'm going to show you a few projects that I worked on using open data and open software, and how it helped me understand the world a little better: gender gap, climate change and politics. Oh, and where people walk in Melbourne city, too.
+
+## Math Gender Gap
+
+\centerline{\includegraphics[width=6in]{gendergap.pdf}}
+
+## Education: OECD PISA
+
+- OECD PISA survey ``the world's global metric for quality, equity and efficiency in school education".
+- Workforce readiness of 15-year old students
+- 500,000 students were tested across 65 countries and 18,000 schools
+- Math, reading and science
+- Data available from [http://www.oecd.org/pisa/keyfindings/pisa-2012-results.htm](http://www.oecd.org/pisa/keyfindings/pisa-2012-results.htm)
+
+---
+
+```{r load_packages, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, results='hide'}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(ggmap)
+library(rworldmap)
+library(grid)    
+library(scales)
+library(gridExtra)
+library(purrr)
+library(boot)
+library(readr)
+```
+
+```{r load_data, echo = FALSE, message = FALSE, warning = FALSE, results='hide', cache=FALSE}
+student2012.sub <- readRDS("student_sub.rds")
+```
+
+```{r mapdata, echo = FALSE, message = FALSE, warning = FALSE, results='hide', cache=FALSE}
+world <- getMap(resolution = "low")
+extractPolys <- function(p) {
+  polys <- NULL
+  for (i in 1:length(p)) {
+    for (j in 1:length(p[[i]]@Polygons)) {
+      x <- p[[i]]@Polygons[[j]]@coords
+      polys$lon <- c(polys$lon, x[,1])
+      polys$lat <- c(polys$lat, x[,2])
+      polys$ID <- c(polys$ID, rep(p[[i]]@ID, nrow(x)))
+      polys$region <- c(polys$region, rep(paste(p[[i]]@ID, j, sep="_"), nrow(x)))
+      polys$order <- c(polys$order, 1:nrow(x))
+    }
+  }
+  return(data.frame(polys))
+}
+polys <- extractPolys(world@polygons)
+
+# Map theme
+theme_map <- theme_bw()
+theme_map$line <- element_blank()
+theme_map$strip.text <- element_blank()
+theme_map$axis.text <- element_blank()
+theme_map$plot.title <- element_blank()
+theme_map$axis.title <- element_blank()
+theme_map$panel.border <- element_rect(colour = "grey90", size=1, fill=NA)
+```
+
+```{r dataprep, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE}
+student2012.sub$ST04Q01 <- factor(student2012.sub$ST04Q01, 
+  levels=c(1,2), labels=c("Female", "Male"))
+```
+
+```{r computemean, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, error=FALSE, fig.width=6, fig.height=7, fig.align='center'}
+# Calculate the statistics
+student2012.stats <- student2012.sub %>% 
+  group_by(CNT) %>%
+  summarise(mathgap=mean(PV1MATH[ST04Q01=="Male"], na.rm=T)-
+                    mean(PV1MATH[ST04Q01=="Female"], na.rm=T),
+            wmathgap=weighted.mean(PV1MATH[ST04Q01=="Male"], 
+                                   w=SENWGT_STU[ST04Q01=="Male"], na.rm=T)-
+                     weighted.mean(PV1MATH[ST04Q01=="Female"],
+                                   w=SENWGT_STU[ST04Q01=="Female"], na.rm=T))
+
+# Compute confidence intervals
+cifn <- function(d, i) {
+  x <- d[i,]
+  ci <- weighted.mean(x$PV1MATH[x$ST04Q01=="Male"], 
+                                   w=x$SENWGT_STU[x$ST04Q01=="Male"], na.rm=T)-
+                     weighted.mean(x$PV1MATH[x$ST04Q01=="Female"],
+                                   w=x$SENWGT_STU[x$ST04Q01=="Female"], na.rm=T)
+  ci
+}
+bootfn <- function(d) {
+  r <- boot(d, statistic=cifn, R=100)
+  l <- sort(r$t)[5]
+  u <- sort(r$t)[95]
+  ci <- c(l, u)
+  return(ci)
+}
+#student2012.sub.summary.gap.boot <- ddply(student2012.sub, .(CNT), bootfn)
+student2012.sub.summary.gap.boot <- student2012.sub %>% 
+  split(.$CNT) %>% purrr::map(bootfn) %>% data.frame() %>%
+  gather(CNT, value)
+student2012.sub.summary.gap.boot$ci <- 
+  rep(c("ml","mu"), length(unique(student2012.sub.summary.gap.boot$CNT)))
+student2012.sub.summary.gap.boot.wide <- student2012.sub.summary.gap.boot %>% spread(ci, value)
+student2012.sub.summary.gap <- merge(student2012.stats, student2012.sub.summary.gap.boot.wide)
+
+# Match three digit codes to country names 
+student2012.sub.summary.gap$name <- NA
+for (i in 1:length(student2012.sub.summary.gap$name))  
+  student2012.sub.summary.gap$name[i] <-
+  isoToName(as.character(student2012.sub.summary.gap$CNT[i]))
+# QCN is Shanghai, not whole of China - Don't know what country TAP is
+student2012.sub.summary.gap$name[student2012.sub.summary.gap$CNT == "QCN"] <- isoToName("CHN")
+student2012.sub.summary.gap$name[student2012.sub.summary.gap$CNT == "TAP"] <- "TAP"
+
+# Make a categorical gap variable
+#student2012.sub.summary.gap <-  student2012.sub.summary.gap %>% 
+#  mutate(wmathgap_cat = cut(wmathgap, breaks=c(-10,-5, 5, 30), 
+#                            labels=c("girls", "same", "boys")))
+student2012.sub.summary.gap$wmathgap_cat <- "same"
+student2012.sub.summary.gap$wmathgap_cat[student2012.sub.summary.gap$ml > 0] <- "boys"
+student2012.sub.summary.gap$wmathgap_cat[student2012.sub.summary.gap$mu < 0] <- "girls"
+
+# Set order of countries by math gap
+student2012.sub.summary.gap$CNT <- factor(student2012.sub.summary.gap$CNT, 
+      levels=student2012.sub.summary.gap$CNT[order(student2012.sub.summary.gap$wmathgap)])
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$wmathgap)])
+
+# Plot
+ggplot(data=student2012.sub.summary.gap) + 
+  geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw() + 
+  geom_point(aes(x=name, y=wmathgap, color=wmathgap_cat), size=3) + 
+  geom_segment(aes(x=name, xend=name, y=ml, yend=mu, color=wmathgap_cat)) + 
+  xlab("") +  
+  scale_colour_manual("", values=c("boys"="skyblue", "girls"="pink", "same"="lightgreen")) +
+  scale_y_continuous("Girls <----------> Boys", breaks=seq(-30, 30, 10), limits=c(-35, 35), 
+                     labels=c(seq(30, 0, -10), seq(10, 30, 10))) + 
+  theme(axis.text.x = element_text(size=5), axis.text.y = element_text(size=5), 
+        axis.title = element_text(size=7), legend.text = element_text(size=5),
+        legend.title = element_text(size=5))
+```
+
+---
+
+```{r maps, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, fig.width=8, fig.height=4}
+polys <- polys %>% rename(name = ID)
+student2012.sub.map <- left_join(student2012.sub.summary.gap, polys)
+student2012.sub.map <- student2012.sub.map %>% arrange(region, order)
+
+ggplot(data=polys) + 
+  geom_path(aes(x=lon, y=lat, group=region, order=order), colour=I("grey90"), size=0.1) + 
+  geom_polygon(data=student2012.sub.map, aes(x=lon, y=lat, group=region, order=order,  fill=wmathgap_cat)) +
+  scale_fill_manual("Diff>5", values=c("boys"="skyblue", "girls"="pink", "same"="lightgreen")) + 
+  scale_x_continuous(expand=c(0,0)) + scale_y_continuous(expand=c(0,0)) +
+  coord_equal() + theme_map + theme(legend.position="None")
+```
+
+## Reading Gap
+
+```{r computereadmean, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, error=FALSE, fig.width=6, fig.height=7, fig.align='center'}
+# Calculate the statistics
+student2012.stats <- student2012.sub %>% 
+  group_by(CNT) %>%
+  summarise(readgap=mean(PV1READ[ST04Q01=="Male"], na.rm=T)-
+                    mean(PV1READ[ST04Q01=="Female"], na.rm=T),
+            wreadgap=weighted.mean(PV1READ[ST04Q01=="Male"], 
+                                   w=SENWGT_STU[ST04Q01=="Male"], na.rm=T)-
+                     weighted.mean(PV1READ[ST04Q01=="Female"],
+                                   w=SENWGT_STU[ST04Q01=="Female"], na.rm=T))
+
+# Compute confidence intervals
+cifn <- function(d, i) {
+  x <- d[i,]
+  ci <- weighted.mean(x$PV1READ[x$ST04Q01=="Male"], 
+                                   w=x$SENWGT_STU[x$ST04Q01=="Male"], na.rm=T)-
+                     weighted.mean(x$PV1READ[x$ST04Q01=="Female"],
+                                   w=x$SENWGT_STU[x$ST04Q01=="Female"], na.rm=T)
+  ci
+}
+bootfn <- function(d) {
+  r <- boot(d, statistic=cifn, R=100)
+  l <- sort(r$t)[5]
+  u <- sort(r$t)[95]
+  ci <- c(l, u)
+  return(ci)
+}
+#student2012.sub.summary.gap.boot <- ddply(student2012.sub, .(CNT), bootfn)
+student2012.sub.summary.gap.boot <- student2012.sub %>% 
+  split(.$CNT) %>% purrr::map(bootfn) %>% data.frame() %>%
+  gather(CNT, value)
+student2012.sub.summary.gap.boot$ci <- 
+  rep(c("ml","mu"), length(unique(student2012.sub.summary.gap.boot$CNT)))
+student2012.sub.summary.gap.boot.wide <- student2012.sub.summary.gap.boot %>% spread(ci, value)
+student2012.sub.summary.gap <- merge(student2012.stats, student2012.sub.summary.gap.boot.wide)
+
+# Match three digit codes to country names 
+student2012.sub.summary.gap$name <- NA
+for (i in 1:length(student2012.sub.summary.gap$name))  
+  student2012.sub.summary.gap$name[i] <-
+  isoToName(as.character(student2012.sub.summary.gap$CNT[i]))
+# QCN is Shanghai, not whole of China - Don't know what country TAP is
+student2012.sub.summary.gap$name[student2012.sub.summary.gap$CNT == "QCN"] <- isoToName("CHN")
+student2012.sub.summary.gap$name[student2012.sub.summary.gap$CNT == "TAP"] <- "TAP"
+
+# Make a categorical gap variable
+#student2012.sub.summary.gap <-  student2012.sub.summary.gap %>% 
+#  mutate(wreadgap_cat = cut(wreadgap, breaks=c(-10,-5, 5, 30), 
+#                            labels=c("girls", "same", "boys")))
+student2012.sub.summary.gap$wreadgap_cat <- "same"
+student2012.sub.summary.gap$wreadgap_cat[student2012.sub.summary.gap$ml > 0] <- "boys"
+student2012.sub.summary.gap$wreadgap_cat[student2012.sub.summary.gap$mu < 0] <- "girls"
+
+# Set order of countries by read gap
+student2012.sub.summary.gap$CNT <- factor(student2012.sub.summary.gap$CNT, 
+      levels=student2012.sub.summary.gap$CNT[order(student2012.sub.summary.gap$wreadgap)])
+student2012.sub.summary.gap$name <- factor(student2012.sub.summary.gap$name, 
+      levels=student2012.sub.summary.gap$name[order(student2012.sub.summary.gap$wreadgap)])
+
+# Plot
+ggplot(data=student2012.sub.summary.gap) + 
+  geom_hline(yintercept=0, colour="grey80") + coord_flip() + theme_bw() + 
+  geom_point(aes(x=name, y=wreadgap, color=wreadgap_cat), size=3) + 
+  geom_segment(aes(x=name, xend=name, y=ml, yend=mu, color=wreadgap_cat)) + 
+  xlab("") +  
+  scale_colour_manual("", values=c("boys"="skyblue", "girls"="pink", "same"="lightgreen")) +
+  scale_y_continuous("Girls <----------> Boys", breaks=seq(-70, 10, 10), limits=c(-75, 15), 
+                     labels=c(seq(70, 0, -10), 10)) + 
+  theme(axis.text.x = element_text(size=5), axis.text.y = element_text(size=5), 
+        axis.title = element_text(size=7), legend.text = element_text(size=5),
+        legend.title = element_text(size=5))
+```
+
+---
+
+```{r mapsread, cache=FALSE, echo = FALSE, message = FALSE, warning = FALSE, fig.width=8, fig.height=4}
+student2012.sub.map <- left_join(student2012.sub.summary.gap, polys)
+student2012.sub.map <- student2012.sub.map %>% arrange(region, order)
+
+ggplot(data=polys) + 
+  geom_path(aes(x=lon, y=lat, group=region, order=order), colour=I("grey90"), size=0.1) + 
+  geom_polygon(data=student2012.sub.map, aes(x=lon, y=lat, group=region, order=order,  fill=wreadgap_cat)) +
+  scale_fill_manual("Diff>5", values=c("boys"="skyblue", "girls"="pink", "same"="lightgreen")) + 
+  scale_x_continuous(expand=c(0,0)) + scale_y_continuous(expand=c(0,0)) +
+  coord_equal() + theme_map + theme(legend.position="None")
+```
+
+## Climate change: What is it about carbon dioxide?
+
+\centerline{\includegraphics[width=6in]{carbon.pdf}}
+
+---
+
+- "Scientific consensus states that carbon emissions must be reduced by 80% by 2050 to avoid temperature rise of more than 2$^o$C." [Carbon Neutral](http://www.carbonneutral.com/resource-hub/carbon-offsetting-explained)
+- Carbon offsets: Carbon offsetting is the use of carbon credits to enable businesses to compensate for their emissions.
+- Kyoto protocol in 1992, attempt to get international cooperation to reduce emissions. 
+
+## Carbon dioxide data
+
+- Data is collected at a number of locations world wide. 
+- See [Scripps Inst. of Oceanography](http://scrippsco2.ucsd.edu/data/atmospheric_co2) 
+- Let's pull the data from the web and take a look ...
+- 
+- Recordings from South Pole (SPO), Kermadec Islands (KER), Mauna Loa Hawaii (MLO), La Jolla Pier, California (LJO), Point Barrow, Alaska (PTB).
+
+---
+
+```{r CO2, fig.width=10, fig.height=5, warning=FALSE, message=FALSE, echo=FALSE, cache=FALSE}
+CO2.ptb<-read.table("http://scrippsco2.ucsd.edu/sites/default/files/data/flask_co2_and_isotopic/daily_co2/fldav_ptb.csv", sep=",", skip=69)
+colnames(CO2.ptb)<-c("date", "time", "day", "decdate", "n", "flg", "co2")
+CO2.ptb$lat<-71.3
+CO2.ptb$lon<-(-156.6)
+CO2.ptb$stn<-"ptb"
+
+CO2.ljo<-read.table("http://scrippsco2.ucsd.edu/sites/default/files/data/flask_co2_and_isotopic/daily_co2/fldav_ljo.csv", sep=",", skip=69)
+colnames(CO2.ljo)<-c("date", "time", "day", "decdate", "n", "flg", "co2")
+CO2.ljo$lat<-32.9
+CO2.ljo$lon<-(-117.3)
+CO2.ljo$stn<-"ljo"
+
+CO2.mlo<-read.table("http://scrippsco2.ucsd.edu/sites/default/files/data/flask_co2_and_isotopic/daily_co2/fldav_mlo.csv", sep=",", skip=69)
+colnames(CO2.mlo)<-c("date", "time", "day", "decdate", "n", "flg", "co2")
+CO2.mlo$lat<-19.5
+CO2.mlo$lon<-(-155.6)
+CO2.mlo$stn<-"mlo"
+
+CO2.spo<-read.table("http://scrippsco2.ucsd.edu/sites/default/files/data/flask_co2_and_isotopic/daily_co2/fldav_spo.csv", sep=",", skip=69)
+colnames(CO2.spo)<-c("date", "time", "day", "decdate", "n", "flg", "co2")
+CO2.spo$lat<- (-90.0)
+CO2.spo$lon<-0
+CO2.spo$stn<-"spo"
+
+CO2.ker<-read.table("http://scrippsco2.ucsd.edu/sites/default/files/data/flask_co2_and_isotopic/daily_co2/fldav_ker.csv", sep=",", skip=69)
+colnames(CO2.ker)<-c("date", "time", "day", "decdate", "n", "flg", "co2")
+CO2.ker$lat<-(-29.2)
+CO2.ker$lon<-(-177.9)
+CO2.ker$stn<-"ker"
+
+CO2.all<-rbind(CO2.ker,CO2.ljo,CO2.mlo,CO2.ptb,CO2.spo)
+CO2.all$date<-as.Date(CO2.all$date)
+
+CO2.all$invlat=-1*CO2.all$lat
+CO2.all$stn=reorder(CO2.all$stn,CO2.all$invlat)
+
+CO2.all.loc <- rbind(CO2.ker[1,],CO2.ljo[1,],CO2.mlo[1,],CO2.ptb[1,],CO2.spo[1,])
+
+p1 <- qplot(date, co2, data=subset(CO2.all, flg < 2), colour=stn, geom="line",xlab="Year",ylab="CO2 (ppm)") + 
+		facet_wrap(~stn, ncol=1) + theme(axis.text.y=element_text(size = 6), legend.position="none")
+p2 <- qplot(date, co2, data=subset(CO2.all, flg < 2), colour=stn, geom="line",xlab="Year",ylab="CO2 (ppm)") + 
+  theme(axis.text.y=element_text(size = 6), legend.position="none")
+grid.arrange(p1, p2, ncol=2)
+```
+
+---
+
+```{r CO2-map, fig.width=4.5, fig.height=2.5, warning=FALSE, message=FALSE, echo=FALSE, cache=FALSE, fig.align='center'}
+world <- map_data("world")
+worldmap <- ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path(color="grey80", size=0.5) + xlab("") + ylab("") +
+  scale_y_continuous(breaks=(-2:2) * 30) +
+  scale_x_continuous(breaks=(-4:4) * 45) +
+  theme_bw() + theme(aspect.ratio=0.6)
+worldmap + geom_point(data=CO2.all.loc, aes(x=lon, y=lat, group=1), colour="red", 
+                      size=2, alpha=0) +
+  geom_text(data=CO2.all.loc, aes(x=lon, y=lat, label=stn, group=1), 
+            colour="orange", size=5)
+```
+
+---
+
+- CO$_2$ is increasing, and it looks like it is exponential increase. **I really expected that the concentration would have flattened out with all of the efforts to reduce carbon emissions.**
+- The same trend is seen at every location - physical mixxing of our atmosphere. **I was suspicious of the data on first seeing this because it looks too perfect.**
+- Some stations show seasonal pattern - actually the more north the more seasonality - population centres and types of trees.
+
+## US politics - 2008 election
+
+- US election process is complicated - depends on the electoral votes for each state in a winner takes all approach
+- Polls released on a regular basis
+- [Monitoring the Election Visually](http://chance.amstat.org/files/2010/12/Visually.pdf)
+- [Can You Buy a President? Politics After the Tillman Act](http://chance.amstat.org/2014/02/president/)
+
+---
+
+\centerline{\includegraphics[width=6in]{elections.pdf}}
+
+---
+
+- Many pollsters are not operating objectively
+- News stories that lead with a poll result may not be accurately reflecting the potential vote outcome
+
+## Australian politics
+
+- First ever ROpenSci, Brisbane April 2016
+- Project [eechida](https://cran.r-project.org/web/packages/eechidna/index.html)
+- [Explore the Australian electorate by voting patterns and demographic makeup](https://vimeo.com/167367369)
+- Is the Australian electorate gerrymandered? Using permutation to assess this.
+
+```{r echo=FALSE, fig.width=10, fig.height=4}
+library(eechidna)
+aec2013 <- aec2013_2cp_electorate %>%
+  filter(Elected == "Y")
+aec_abs <- merge(aec2013, abs2011, by = "Electorate")
+aec_abs$PartyGp <- aec_abs$PartyAb
+aec_abs$PartyGp[aec_abs$PartyGp %in% c("LP","LNP","NP","CLP")] <- "Coalition"
+aec_abs$PartyGp[aec_abs$PartyGp %in% c("IND","PUP","KAP","GRN")] <- "Other"
+ggplot(data=aec_abs, aes(x=Population)) + geom_dotplot(binwidth=2900) +
+  facet_wrap(~PartyGp, ncol = 3) + ylab("") + xlab("Population ('000)") +
+  scale_x_continuous(breaks=seq(75000, 225000, 25000), labels=seq(75, 225, 25))
+```
+
+---
+
+
+```{r echo=FALSE, fig.height=4, fig.width=8, fig.align='center'}
+mad <- function(df, shuffle=TRUE) {
+  if (shuffle)
+    df$PartyGp <- sample(df$PartyGp)
+  df_means <- df %>% group_by(PartyGp) %>%
+    summarise(m = mean(Population, na.rm=T))
+  return(d = abs(df_means$m[1] - df_means$m[2]))
+}
+aec_abs_sub <- aec_abs %>% filter(PartyGp != "Other")
+aec_abs_meandif <- mad(aec_abs_sub, shuffle=FALSE)
+aec_abs_shuffle <-1:1000 %>% map_dbl(~ mad(aec_abs_sub))
+aec_abs_shuffle <- data.frame(d=aec_abs_shuffle, y=1:1000)
+ggplot(data=aec_abs_shuffle, aes(x=d)) + geom_dotplot(binwidth=100) +
+  geom_vline(xintercept=aec_abs_meandif, colour="red")
+```
+
+## Pedestrians in Melbourne city
+
+```{r eval=FALSE, echo = FALSE, message = FALSE, warning = FALSE}
+# Get pedestrian sensor locations
+ped_loc <- read_csv("Pedestrian_Sensor_Locations.csv")
+
+melb <- get_map(location=c(mean(range(ped_loc$Longitude)),
+                           mean(range(ped_loc$Latitude))), zoom=10)
+ggmap(melb) + geom_point(data=ped_loc, 
+                         aes(x=Longitude, y=Latitude), 
+                         colour="#c51b7d", alpha=0.5, size=3)
+```
+
+\centerline{\includegraphics[width=4in]{sensor_locations.pdf}}
+
+---
+
+```{r eval=FALSE, echo = FALSE, message = FALSE, warning = FALSE, fig.align='center'}
+library(jsonlite)
+limit <- 1453000 # all the up-to-date records need to be retrieved
+web_add <- "https://data.melbourne.vic.gov.au/resource/mxb8-wn4w.json?"
+ped_url <- paste0(web_add, "$limit=", limit)
+pedestrian <- fromJSON(ped_url) # without api token
+pedestrian <- tbl_df(pedestrian)
+colnames(pedestrian) <- c("date_time", "day", "id", "mdate", "month", "count", "sensor_id", "sensor_name", "time", "year")
+pedestrian <- pedestrian %>%
+  mutate(date = as.Date(paste(pedestrian$mdate,
+                              pedestrian$month,
+                              pedestrian$year, sep="-"),
+                        "%d-%b-%Y", tz = "AEST"),
+         count = as.integer(count), sensor_id = factor(sensor_id))
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Read sensor counts
+ped_sub <- read_csv("pedestrian_counts_sub.csv")
+ped_sub <- ped_sub %>% 
+  filter(year == 2015, month == "February") %>%
+  filter(sensor_name %in% c("Flinders Street Station Underpass", 
+                            "Flagstaff Station", "Melbourne Central")) %>%
+  dplyr::arrange(sensor_id, date, time) 
+ped_sub$day <- factor(ped_sub$day, levels=c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"))
+ggplot(ped_sub, aes(x=time, y=count, colour=sensor_name)) +
+  facet_grid(sensor_name~day) +
+  scale_colour_brewer(palette="Dark2") +
+  geom_line(aes(group=date)) +
+  theme(legend.position="None")
+```
+
+## Power to the R-Ladies
+
+With a laptop loaded with R you can go and do anything!
+
+## Share and share alike
+
+This work is licensed under the Creative Commons Attribution-Noncommercial 3.0 United States License. To view a copy of this license, visit http://creativecommons.org/licenses/by-nc/ 3.0/us/ or send a letter to Creative Commons, 171 Second Street, Suite 300, San Francisco, California, 94105, USA.
