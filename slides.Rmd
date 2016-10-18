@@ -462,7 +462,7 @@ With a laptop loaded with R you can go and do anything!
 
 \vspace{2in}
 
-Slides and code at [https://github.com/dicook/RLadies_Melb]([https://github.com/dicook/RLadies_Melb]).
+Slides and code at [https://github.com/dicook/RLadies_Melb](https://github.com/dicook/RLadies_Melb).
 
 ## Share and share alike
 
